@@ -1,0 +1,5 @@
+# 模块文件全集：4 个；报告里 state.py 重复、state2.py 与 docs/order.md 漏项、other.py 多余
+src/order/lifecycle.py
+src/order/state.py
+src/order/state2.py
+docs/order.md

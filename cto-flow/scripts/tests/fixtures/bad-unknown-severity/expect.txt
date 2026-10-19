@@ -1,0 +1,3 @@
+exit=1
+first_rule=R7.severity-unknown
+rules=R7.severity-unknown

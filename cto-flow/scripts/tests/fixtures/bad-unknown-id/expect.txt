@@ -1,0 +1,3 @@
+exit=1
+first_rule=R6.unknown-id
+rules=R6.unknown-id

@@ -1,0 +1,3 @@
+exit=1
+first_rule=R5.findings-table
+rules=R5.findings-table

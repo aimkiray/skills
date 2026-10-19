@@ -1,0 +1,3 @@
+exit=1
+first_rule=R5.id-column
+rules=R5.id-column

@@ -1,0 +1,3 @@
+exit=1
+first_rule=R3.conclusions-duplicate
+rules=R3.conclusions-duplicate,R3.conclusions-missing,R3.conclusions-extra

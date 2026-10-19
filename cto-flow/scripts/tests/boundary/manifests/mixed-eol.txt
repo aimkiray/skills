@@ -1,0 +1,4 @@
+# mod-order-lifecycle 期望文件全集（仓库相对路径）
+src/order/lifecycle.py
+src/order/state.py
+docs/order.md

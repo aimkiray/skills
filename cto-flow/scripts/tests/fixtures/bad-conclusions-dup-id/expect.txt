@@ -1,0 +1,3 @@
+exit=1
+first_rule=R4.n-vs-ids
+rules=R4.n-vs-ids

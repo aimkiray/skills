@@ -1,0 +1,3 @@
+exit=1
+first_rule=R5.id-unique
+rules=R5.id-unique,R5.id-sequence

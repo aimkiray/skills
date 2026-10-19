@@ -1,0 +1,4 @@
+# 历史散装报告：无 meta / 无 conclusions / 发现项表首列不是 id
+app/src/main/java/io/github/aimkiray/meowsync/MainActivity.kt
+app/src/commonMain/kotlin/io/github/aimkiray/meowsync/core/util/CacheDirs.kt
+docs/SPEC.md
