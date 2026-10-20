@@ -1,7 +1,7 @@
 ---
 name: cto-flow
 description: Run a coding task through the CTO orchestration protocol — the main agent only plans, dispatches, and accepts; subagents act as named engineers — specification engineers draft the batch spec first, senior software engineers implement in parallel, an equal number of lead review engineers deep-review, then defect-fix engineers repair and an independent verification engineer re-verifies. Use for any code change, refactor, migration, audit, or multi-file task.
-version: 1.2.1
+version: 1.2.2
 ---
 
 # CTO Flow
@@ -190,7 +190,7 @@ version: 1.2.1
 
 **全角色报告落盘**：批次开工时 CTO 在台账声明本批报告归档目录（仓库外路径或 `docs/reviews/` 类），任务书写明绝对路径；**全部角色**（含实施 / 修复 / 重构 / 检查点提交 / 发布执行）的报告一律落盘，回传内容按 §5 回传契约执行；§5 未覆盖的角色只放 `meta` 计数 + 交付物路径 + SHA256 + 未解决项一行。实施 / 修复类报告同样以 `meta` 机读块开头，字段固定为 `unit` / `verdict` / `files` / `sha256_before` / `sha256_after` / `reverse_restore` / `unresolved` 七行、顺序固定；`verdict` 取值域 `pass | fail`，`reverse_restore` 取值 `pass | fail | na`。
 
-**实施 / 修复报告 `meta` 机读口径（与 `scripts/cto_verify.py --kind impl` 的校验逐条对应；本句是值域的唯一权威全文，§4 / §8.9 模板只作指针）**：`files` 取两种形态之一——单文件单元写 ASCII 非负整数 `1`；多文件单元写以 `;` 或 `；` 分隔的仓库相对路径列表（不得含空元素、空白、反引号与 `|`）；`sha256_before` / `sha256_after` 对应取单值（64 位十六进制）或与 `files` 列表等长的 `路径=哈希` 列表（按最后一个 `=` 切分，路径须与 `files` 同位元素一致）；`sha256_before` 的元素或整值可取 `none`（新建文件无基线，此时 `reverse_restore` 必须为 `na`），`sha256_after` 不得取 `none`；before 与 after 对应位全部相等时必须在正文写出 `sha256 相同` 及理由，否则判不通过；`reverse_restore: fail` 时 `verdict` 不得为 `pass`；`unresolved` 写 `无` 或以 `;` / `；` 分隔的未决项简述，其非 `无` 不阻断 `verdict: pass`（未决项仍须逐项落盘正文）。
+**实施 / 修复报告 `meta` 机读口径（与 `scripts/cto_verify.py --kind impl` 的校验逐条对应；本句是值域的唯一权威全文，§4 / §8.9 模板只作指针）**：`files` 取两种形态之一——单文件单元写 ASCII 非负整数 `1`；多文件单元写以 `;` 或 `；` 分隔的仓库相对路径列表（不得含空元素、空白、反引号与 `|`）；`sha256_before` / `sha256_after` 对应取单值（64 位十六进制）或与 `files` 列表等长的 `路径=哈希` 列表（按最后一个 `=` 切分，路径须与 `files` 同位元素一致）；`sha256_before` 的元素或整值可取 `none`（新建文件无基线，此时 `reverse_restore` 必须为 `na`），`sha256_after` 不得取 `none`；before 与 after 对应位全部相等时必须在正文写出 `sha256 相同` 及理由（检索范围为正文：`meta` 机读块不算正文、块内该标记不计入豁免，正文内其它围栏块计入），否则判不通过；`reverse_restore: fail` 时 `verdict` 不得为 `pass`；`unresolved` 写 `无` 或以 `;` / `；` 分隔的未决项简述，其非 `无` 不阻断 `verdict: pass`（未决项仍须逐项落盘正文）。
 
 **证据产物归档**：评审 / 复验 / 验证报告、结论行文件、构建日志、指纹与快照等证据产物一律落盘到本批声明的归档路径（仓库外固定目录，或入库时 `docs/reviews/` 类路径），进度台账逐份登记绝对路径 + SHA256；未登记路径的产物视为未交付（按静默失败 ① 处理）。
 
@@ -602,6 +602,7 @@ minor: 5
 | 1.1.0 | 2026-10-19 | 基线：§9 审查批次模式、顺序优先、角色独立性表、meta/conclusions 机读块、构建证据契约、共享工作区并发纪律 |
 | 1.2.0 | 2026-10-20 | 能力档映射与降级协议；子代理生命周期（僵尸/停滞/增量落盘/中断核实）；外部副作用白名单；全角色报告落盘与回传容量预算、CTO 上下文预算；worktree 优先与树级操作禁令；CTO 越权自查清单；规格竞争启用条件与候选隔离；批次开工指纹；诊断车道与审计变体；角色称谓封闭集；证据产物归档；环境前置段 |
 | 1.2.1 | 2026-10-20 | §6 增实施/修复报告 `meta` 机读口径句（七字段值域唯一权威全文，对应 `cto_verify.py --kind impl`）；文末增附录 A 平台与环境陷阱清单（指导性，九条实测条目） |
+| 1.2.2 | 2026-10-20 | §6 机读口径句明示「sha256 相同」免责标记检索范围（`meta` 块不计入豁免）；对应 `cto_verify.py` 1.2.1 R8.sha-equal 收窄至正文 |
 
 **权威源码**：`C:\Users\laevatain\Code\skills\cto-flow\`（仓库内唯一权威版本，改动必须先落仓库）。
 **部署方式**：把本目录复制到 `~\.agents\skills\`（部署副本非权威，漂移时以仓库版为准）。

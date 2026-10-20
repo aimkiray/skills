@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 TOOL_NAME = "cto_verify"
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.2.1"
 
 ERROR = "ERROR"
 WARN = "WARN"
@@ -811,7 +811,7 @@ def _impl_parse_sha_field(
 def _check_impl_meta(
     meta: Dict[str, Tuple[int, str]],
     lines: Sequence[str],
-    masked: set,
+    meta_blocks: Sequence[Block],
     manifest_entries: Optional[List[Tuple[str, int]]],
     violations: List[Violation],
 ) -> Dict[str, object]:
@@ -1019,7 +1019,11 @@ def _check_impl_meta(
                 for (bp, bh), (ap, ah) in zip(b_list, a_list)
             )
     if all_equal:
-        body = "\n".join(lines)
+        meta_span: set = set()
+        for mb in meta_blocks:
+            mb_end = mb.end if mb.end is not None else len(lines) - 1
+            meta_span.update(range(mb.start, mb_end + 1))
+        body = "\n".join(line for i, line in enumerate(lines) if i not in meta_span)
         if _SHA_EQUAL_EXEMPT not in body:
             violations.append(
                 Violation(
@@ -1148,7 +1152,7 @@ def verify_report(
     if is_impl:
         # ---------------- R8: impl 七字段值域 / 联动 / manifest 集合对账 ----------------
         result.stats = _check_impl_meta(
-            meta, lines, masked, manifest_entries, violations
+            meta, lines, meta_blocks, manifest_entries, violations
         )
         result.stats["kind"] = "impl"
         result.stats["manifest_supplied"] = manifest_entries is not None

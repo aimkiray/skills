@@ -1,0 +1,3 @@
+exit=1
+first_rule=R1.meta-block
+rules=R1.meta-block,R2.conclusions-block,R5.findings-table

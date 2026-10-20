@@ -8,7 +8,7 @@
   args.txt      可选：每非空非 `#` 行作为一个附加 CLI 参数（如 --kind / impl）
   expect.txt    期望：exit=<0|1>、first_rule=<规则名>、rules=<逗号分隔的规则集合>
 
-用法：python -B scripts/tests/run_fixtures.py [--verbose]
+用法：python -B scripts/tests/run_fixtures.py [--verbose]（另跑 boundary/ 扁平夹具：<stem>.md + manifests/<stem>.txt + expect/<stem>.txt）
 """
 
 import json
@@ -19,6 +19,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(os.path.dirname(HERE), "cto_verify.py")
 FIXTURES = os.path.join(HERE, "fixtures")
+BOUNDARY = os.path.join(HERE, "boundary")
 
 
 def parse_expect(path):
@@ -89,15 +90,54 @@ def main(argv=None):
         rows.append((name, proc.returncode, first_rule, expected_first, ok,
                      ",".join(actual_rules)))
 
-    width = max([len(r[0]) for r in rows] + [7])
+    # ---- boundary/ 扁平夹具（BOM / 0 字节 / 混合行尾；= --dir 原生形态） ----
+    b_rows, b_ok = [], 0
+    b_names = []
+    if os.path.isdir(BOUNDARY):
+        b_names = sorted(
+            n[:-3] for n in os.listdir(BOUNDARY)
+            if n.endswith(".md") and os.path.isfile(os.path.join(BOUNDARY, n))
+        )
+    for name in b_names:
+        expect = parse_expect(os.path.join(BOUNDARY, "expect", name + ".txt"))
+        cmd = [sys.executable, "-B", TOOL, "--report",
+               os.path.join(BOUNDARY, name + ".md"), "--json"]
+        manifest = os.path.join(BOUNDARY, "manifests", name + ".txt")
+        if os.path.isfile(manifest):
+            cmd += ["--manifest", manifest]
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", env=env
+        )
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            b_rows.append((name, proc.returncode, "<bad-json>", "", False,
+                           proc.stdout + proc.stderr))
+            continue
+        errors = [v for v in payload["reports"][0]["violations"]
+                  if v["severity"] == "ERROR"]
+        first_rule = errors[0]["rule"] if errors else ""
+        actual_rules = sorted({v["rule"] for v in errors})
+        ok = proc.returncode == int(expect.get("exit", "0"))
+        if expect.get("first_rule", "") and first_rule != expect["first_rule"]:
+            ok = False
+        if any(r not in actual_rules
+               for r in expect.get("rules", "").split(",") if r):
+            ok = False
+        b_ok += 1 if ok else 0
+        b_rows.append((name, proc.returncode, first_rule,
+                       expect.get("first_rule", ""), ok, ",".join(actual_rules)))
+    width = max([len(r[0]) for r in rows + b_rows] + [7])
     print("%-*s | exit | first-rule            | expected              | ok" % (width, "fixture"))
     print("-" * (width + 62))
-    for name, code, first, expected_first, ok, actual in rows:
+    for name, code, first, expected_first, ok, actual in rows + b_rows:
         print("%-*s |  %d   | %-22s | %-21s | %s" % (width, name, code, first, expected_first, "OK" if ok else "FAIL"))
         if verbose and not ok:
             print("    actual rules: %s" % actual)
     print("FIXTURES %d/%d passed" % (ok_count, len(rows)))
-    return 0 if ok_count == len(rows) else 1
+    print("BOUNDARY %d/%d passed" % (b_ok, len(b_rows)))
+    return 0 if (ok_count == len(rows) and b_ok == len(b_rows)) else 1
 
 
 if __name__ == "__main__":
