@@ -23,6 +23,13 @@
       （R5.dangling-id）——无 id 列的诱饵附表夹带未登记 id 仍判不通过。
   R6  conclusions 引用的每个 id 必须在该报告的发现项表中存在。
   R7  meta 的三个计数必须分别等于发现项表中同级别行数；分级词无法识别即判不通过。
+  R8  （仅 --kind impl，§6 实施/修复类报告；此模式不校验 R2–R7）meta 块字段
+      恰为 unit/verdict/files/sha256_before/sha256_after/reverse_restore/unresolved
+      且顺序固定；files 为计数形态（仅允许 1）或 `;`/`；` 分隔的仓库相对路径
+      列表，与 sha256_* 的单值 / `路径=哈希` 列表形态逐一对应；sha256_before
+      可取 none（此时 reverse_restore 必须为 na），before/after 对应位全部
+      相等须在正文写明「sha256 相同」及理由；reverse_restore: fail 时 verdict
+      不得为 pass；提供 --manifest 且 files 为列表形态时做集合对账。
 
 退出码：0 = 全部通过；1 = 存在契约违规（含超长数字等无法解析的取值）；2 = 用法、
 IO 或校验器内部错误（内部错误不打印 traceback）。
@@ -33,6 +40,7 @@ IO 或校验器内部错误（内部错误不打印 traceback）。
   python scripts/cto_verify.py --report reviews/mod-a.md --manifest specs/mod-a.manifest
   python scripts/cto_verify.py --dir reviews/round1 --manifest-dir reviews/round1/manifests
   python scripts/cto_verify.py --report reviews/mod-a.md --json
+  python scripts/cto_verify.py --report reports/unit-a.md --kind impl
 """
 
 from __future__ import annotations
@@ -46,13 +54,32 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 TOOL_NAME = "cto_verify"
-TOOL_VERSION = "1.1.0"
+TOOL_VERSION = "1.2.0"
 
 ERROR = "ERROR"
 WARN = "WARN"
 
 META_FIELDS: Tuple[str, ...] = ("module", "verdict", "severe", "medium", "minor")
 VERDICT_VALUES = ("pass", "fail")
+# §6 实施/修复类报告（--kind impl）的七字段 meta，字段名与顺序固定
+IMPL_META_FIELDS: Tuple[str, ...] = (
+    "unit",
+    "verdict",
+    "files",
+    "sha256_before",
+    "sha256_after",
+    "reverse_restore",
+    "unresolved",
+)
+RR_VALUES = ("pass", "fail", "na")
+# sha256_* 的合法哈希形态：64 位十六进制；sha256_before 另允许整值/元素取 none
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+# files / sha256_* 列表形态的分隔符（半角分号与全角分号）
+_LIST_SEP_RE = re.compile(r"[;；]")
+# files 路径元素的禁字符：空白、反引号、`|`
+_FILES_ELEM_BAD_RE = re.compile(r"[\s`|]")
+# before/after 对应位全部相等时的免责字面标记（§6：正文须写出该句及理由）
+_SHA_EQUAL_EXEMPT = "sha256 相同"
 # 两位序号；超过 99 时按实际位数自然扩展（F-100…），上限 9 位以免 int() 溢出
 ID_RE = re.compile(r"^F-(\d{2,9})$")
 # 正文 / 表格单元格里出现的 id 记号（用于「悬空 id」判定；不要求整格匹配）
@@ -485,8 +512,18 @@ def pick_findings_table(tables: Sequence[FindingsTable]) -> Optional[FindingsTab
     return max(id_tables, key=score)
 
 
-def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int, str]]:
-    """返回 {字段: (行号, 原始值)}；所有问题记入 violations。"""
+def parse_meta(
+    block: Block,
+    violations: List[Violation],
+    expected_fields: Tuple[str, ...] = META_FIELDS,
+    rule_prefix: str = "R1",
+) -> Dict[str, Tuple[int, str]]:
+    """返回 {字段: (行号, 原始值)}；所有问题记入 violations。
+
+    结构判定（缺/多/乱序/重复字段、`字段: 值` 形态、verdict 取值域）对 review
+    与 impl 通用：调用方传入 expected_fields 与 rule_prefix（R1 / R8）；
+    severe/medium/minor 计数核对仅当这些字段在 expected_fields 中才有意义。
+    """
     entries: List[Tuple[int, str]] = []
     for idx, raw in block.content:
         if raw.strip() == "":
@@ -499,7 +536,7 @@ def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int
         if not m:
             violations.append(
                 Violation(
-                    "R1.meta-fields",
+                    rule_prefix + ".meta-fields",
                     idx + 1,
                     "meta 行必须为 `字段: 值`，无法解析：%r" % short_value(raw),
                 )
@@ -508,7 +545,7 @@ def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int
         parsed.append((idx, m.group(1), m.group(2).strip()))
 
     names = [name for _, name, _ in parsed]
-    expected = list(META_FIELDS)
+    expected = list(expected_fields)
     if names != expected:
         if entries:
             line = entries[0][0] + 1
@@ -520,7 +557,7 @@ def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int
             detail += "；重复字段：%s" % ", ".join(dup)
         violations.append(
             Violation(
-                "R1.meta-fields",
+                rule_prefix + ".meta-fields",
                 line,
                 "meta 字段必须恰为 %s 且顺序固定；%s" % ("/".join(expected), detail),
             )
@@ -530,12 +567,18 @@ def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int
     for idx, name, value in parsed:
         if name not in expected:
             violations.append(
-                Violation("R1.meta-fields", idx + 1, "meta 出现未定义字段 `%s`" % name)
+                Violation(
+                    rule_prefix + ".meta-fields",
+                    idx + 1,
+                    "meta 出现未定义字段 `%s`" % name,
+                )
             )
             continue
         if name in result:
             violations.append(
-                Violation("R1.meta-fields", idx + 1, "meta 字段 `%s` 重复" % name)
+                Violation(
+                    rule_prefix + ".meta-fields", idx + 1, "meta 字段 `%s` 重复" % name
+                )
             )
             continue
         result[name] = (idx + 1, value)
@@ -545,7 +588,7 @@ def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int
         if value not in VERDICT_VALUES:
             violations.append(
                 Violation(
-                    "R1.meta-verdict",
+                    rule_prefix + ".meta-verdict",
                     line,
                     "verdict 只能取 pass 或 fail（实际 %r）" % short_value(value),
                 )
@@ -557,7 +600,7 @@ def parse_meta(block: Block, violations: List[Violation]) -> Dict[str, Tuple[int
         if parse_uint(value) is None:
             violations.append(
                 Violation(
-                    "R1.meta-counts",
+                    rule_prefix + ".meta-counts",
                     line,
                     "%s 必须为非负整数（仅 ASCII 数字、最多 %d 位，拒绝“约/若干”等），实际 %r"
                     % (name, _MAX_DIGITS, short_value(value)),
@@ -688,6 +731,345 @@ def parse_manifest(path: str) -> Tuple[List[Tuple[str, int]], List[Tuple[str, in
 
 
 # --------------------------------------------------------------------------- #
+# impl（--kind impl）七字段 meta 校验（§6 实施/修复类报告）
+# --------------------------------------------------------------------------- #
+
+
+def _impl_parse_sha_field(
+    name: str, line: int, value: str, violations: List[Violation]
+) -> Tuple[Optional[str], object]:
+    """解析 sha256_before / sha256_after 字段。
+
+    返回 (form, data)：form 为 "single"（data=64-hex 或 "none"）、
+    "list"（data=[(路径, 64-hex 或 "none"), ...]）或 None（无法解析）。
+    `none` 仅 sha256_before 允许（整值或列表元素均可）；按最后一个 `=` 切分，
+    路径中含 `=` 也不误判。
+    """
+    allow_none = name == "sha256_before"
+    v = value.strip()
+    if not v:
+        violations.append(Violation("R8.meta-sha", line, "%s 值不能为空" % name))
+        return None, None
+    if allow_none and v == "none":
+        return "single", "none"
+    if _SHA256_RE.match(v):
+        return "single", v
+    elems: List[Tuple[str, str]] = []
+    for part in _LIST_SEP_RE.split(v):
+        part = part.strip()
+        path, sep, hexv = part.rpartition("=")
+        if not sep:
+            violations.append(
+                Violation(
+                    "R8.meta-sha",
+                    line,
+                    "%s 必须为 64 位十六进制%s，或以 `;`/`；` 分隔的 `<路径>=<哈希>`"
+                    " 列表（按最后一个 `=` 切分），实际 %r"
+                    % (name, "或 none " if allow_none else "", short_value(part)),
+                )
+            )
+            continue
+        p = path.strip()
+        h = hexv.strip()
+        if not p:
+            violations.append(
+                Violation(
+                    "R8.meta-sha",
+                    line,
+                    "%s 列表元素的路径为空（形态 `<路径>=<哈希>`），实际 %r"
+                    % (name, short_value(part)),
+                )
+            )
+            continue
+        if h == "none":
+            if allow_none:
+                elems.append((p, h))
+            else:
+                violations.append(
+                    Violation(
+                        "R8.meta-sha",
+                        line,
+                        "%s 不得取 none（元素 %r）；仅 sha256_before 允许 none"
+                        % (name, p),
+                    )
+                )
+            continue
+        if not _SHA256_RE.match(h):
+            violations.append(
+                Violation(
+                    "R8.meta-sha",
+                    line,
+                    "%s 元素 %r 的哈希必须为 64 位十六进制%s，实际 %r"
+                    % (name, p, "或 none" if allow_none else "", short_value(h)),
+                )
+            )
+            continue
+        elems.append((p, h))
+    return "list", elems
+
+
+def _check_impl_meta(
+    meta: Dict[str, Tuple[int, str]],
+    lines: Sequence[str],
+    masked: set,
+    manifest_entries: Optional[List[Tuple[str, int]]],
+    violations: List[Violation],
+) -> Dict[str, object]:
+    """§6 七字段 meta 的值域与联动校验（规则名 R8.*）。
+
+    字段结构（缺/多/乱序/重复）由 parse_meta 记 R8.meta-fields，verdict 取值域
+    由 parse_meta 记 R8.meta-verdict；此处逐字段查值域、files ⇄ sha256_* 形态
+    对应、none/verdict 联动、before==after 恒等与 manifest 集合对账。
+    """
+    stats: Dict[str, object] = {}
+
+    def entry(name: str) -> Tuple[Optional[int], str]:
+        item = meta.get(name)
+        return (item[0], item[1]) if item is not None else (None, "")
+
+    # ---- unit：非空自由文本（单元标识） ----
+    unit_line, unit_value = entry("unit")
+    if unit_line is not None and not unit_value.strip():
+        violations.append(
+            Violation("R8.meta-unit", unit_line, "unit 不能为空（单元标识自由文本）")
+        )
+
+    # ---- files：计数形态（仅允许 1）或 `;`/`；` 分隔的仓库相对路径列表 ----
+    files_line, files_value = entry("files")
+    files_form: Optional[str] = None
+    files_elems: List[str] = []
+    files_n: Optional[int] = None
+    if files_line is not None:
+        fv = files_value.strip()
+        if not fv:
+            violations.append(
+                Violation("R8.files-format", files_line, "files 值不能为空")
+            )
+        elif _INT_RE.match(fv):
+            files_n = parse_uint(fv)
+            if files_n is None:
+                violations.append(
+                    Violation(
+                        "R8.files-format",
+                        files_line,
+                        "files 计数形态须为不超过 %d 位的 ASCII 非负整数，实际 %r"
+                        % (_MAX_DIGITS, short_value(fv)),
+                    )
+                )
+            else:
+                files_form = "count"
+                if files_n != 1:
+                    violations.append(
+                        Violation(
+                            "R8.files-sha-count",
+                            files_line,
+                            "files 计数形态仅允许 `1`（单文件单元）；多文件单元须写"
+                            " `;`/`；` 分隔的仓库相对路径列表，实际 %d" % files_n,
+                        )
+                    )
+        else:
+            files_form = "list"
+            for part in _LIST_SEP_RE.split(files_value):
+                elem = part.strip()
+                if not elem:
+                    violations.append(
+                        Violation(
+                            "R8.files-format",
+                            files_line,
+                            "files 列表含空元素（`；`/`;` 分隔后元素不得为空），原值 %r"
+                            % short_value(files_value),
+                        )
+                    )
+                    continue
+                if _FILES_ELEM_BAD_RE.search(elem):
+                    violations.append(
+                        Violation(
+                            "R8.files-format",
+                            files_line,
+                            "files 路径元素 %r 不得含空白、反引号或 `|`"
+                            % short_value(elem),
+                        )
+                    )
+                    continue
+                files_elems.append(elem)
+    stats["files_form"] = files_form or "invalid"
+    stats["files_count"] = (
+        files_n if files_form == "count" and files_n is not None else len(files_elems)
+    )
+
+    # ---- sha256_before / sha256_after：单值 64-hex（before 另许 none）或 `路径=哈希` 列表 ----
+    sha_forms: Dict[str, Optional[str]] = {}
+    sha_datas: Dict[str, object] = {}
+    sha_lines: Dict[str, int] = {}
+    for name in ("sha256_before", "sha256_after"):
+        s_line, s_value = entry(name)
+        if s_line is None:
+            continue
+        sha_lines[name] = s_line
+        form, data = _impl_parse_sha_field(name, s_line, s_value, violations)
+        sha_forms[name] = form
+        sha_datas[name] = data
+
+    # ---- 形态对应：files 列表 ⇄ 双 sha 等长列表逐位同路径；files 计数 ⇄ 双 sha 单值 ----
+    if files_form == "count":
+        for name in ("sha256_before", "sha256_after"):
+            if sha_forms.get(name) == "list":
+                violations.append(
+                    Violation(
+                        "R8.files-sha-count",
+                        sha_lines[name],
+                        "files 为计数形态（=1），%s 必须为单值 64 位十六进制%s，"
+                        "不得为 `路径=哈希` 列表"
+                        % (name, "或 none" if name == "sha256_before" else ""),
+                    )
+                )
+    elif files_form == "list":
+        for name in ("sha256_before", "sha256_after"):
+            form = sha_forms.get(name)
+            if form == "single":
+                violations.append(
+                    Violation(
+                        "R8.files-sha-count",
+                        sha_lines[name],
+                        "files 为 %d 元素路径列表，%s 必须为等长的 `<路径>=<哈希>`"
+                        " 列表，不得为单值" % (len(files_elems), name),
+                    )
+                )
+            elif form == "list":
+                sha_elems = sha_datas[name]
+                if len(sha_elems) != len(files_elems):
+                    violations.append(
+                        Violation(
+                            "R8.files-sha-count",
+                            sha_lines[name],
+                            "%s 列表元素数 %d 与 files 元素数 %d 不一致"
+                            % (name, len(sha_elems), len(files_elems)),
+                        )
+                    )
+                else:
+                    for i, (f_elem, s_elem) in enumerate(zip(files_elems, sha_elems)):
+                        if norm_path(f_elem) != norm_path(s_elem[0]):
+                            violations.append(
+                                Violation(
+                                    "R8.files-sha-path",
+                                    sha_lines[name],
+                                    "%s 第 %d 个元素路径 %r 与 files 第 %d 个元素 %r"
+                                    " 归一化后不一致"
+                                    % (name, i + 1, s_elem[0], i + 1, f_elem),
+                                )
+                            )
+
+    # ---- reverse_restore 值域 ----
+    rr_line, rr_value = entry("reverse_restore")
+    rr = rr_value.strip()
+    if rr_line is not None and rr not in RR_VALUES:
+        violations.append(
+            Violation(
+                "R8.meta-rr",
+                rr_line,
+                "reverse_restore 只能取 pass、fail 或 na（实际 %r）" % short_value(rr),
+            )
+        )
+
+    # ---- none 联动：sha256_before 含 none（整值或任一列表元素）⇒ rr 必须为 na ----
+    before_has_none = False
+    if sha_forms.get("sha256_before") == "single":
+        before_has_none = sha_datas["sha256_before"] == "none"
+    elif sha_forms.get("sha256_before") == "list":
+        before_has_none = any(h == "none" for _p, h in sha_datas["sha256_before"])
+    if before_has_none and rr != "na":
+        violations.append(
+            Violation(
+                "R8.none-consistency",
+                rr_line if rr_line is not None else 1,
+                "sha256_before 含 none（新建文件无基线），reverse_restore 必须为 na，"
+                "实际 %r" % short_value(rr),
+            )
+        )
+
+    # ---- 反向还原联动：rr=fail ⇒ verdict 不得为 pass ----
+    verdict_line, verdict_value = entry("verdict")
+    if rr == "fail" and verdict_value.strip() == "pass":
+        violations.append(
+            Violation(
+                "R8.verdict-rr",
+                verdict_line if verdict_line is not None else 1,
+                "reverse_restore 为 fail 时 verdict 不得为 pass",
+            )
+        )
+
+    # ---- 恒等约束：before/after 对应位全部相等且无免责说明 ⇒ 违规 ----
+    all_equal = False
+    if (
+        sha_forms.get("sha256_before") == "single"
+        and sha_forms.get("sha256_after") == "single"
+    ):
+        b_val = sha_datas["sha256_before"]
+        a_val = sha_datas["sha256_after"]
+        all_equal = b_val != "none" and str(b_val).lower() == str(a_val).lower()
+    elif (
+        sha_forms.get("sha256_before") == "list"
+        and sha_forms.get("sha256_after") == "list"
+    ):
+        b_list = sha_datas["sha256_before"]
+        a_list = sha_datas["sha256_after"]
+        if b_list and len(b_list) == len(a_list):
+            all_equal = all(
+                norm_path(bp) == norm_path(ap) and str(bh).lower() == str(ah).lower()
+                for (bp, bh), (ap, ah) in zip(b_list, a_list)
+            )
+    if all_equal:
+        body = "\n".join(lines)
+        if _SHA_EQUAL_EXEMPT not in body:
+            violations.append(
+                Violation(
+                    "R8.sha-equal",
+                    sha_lines.get("sha256_after", 1),
+                    "sha256_before 与 sha256_after 对应位全部相等：必须在正文写出"
+                    " `sha256 相同` 及理由，否则判不通过",
+                )
+            )
+
+    # ---- unresolved：非空（`无` 或 `;`/`；` 分隔的未决项简述） ----
+    unr_line, unr_value = entry("unresolved")
+    if unr_line is not None and not unr_value.strip():
+        violations.append(
+            Violation(
+                "R8.meta-unresolved",
+                unr_line,
+                "unresolved 不能为空；无未决项写 `无`，否则写 `;`/`；` 分隔的简述",
+            )
+        )
+
+    # ---- manifest 集合对账：仅 files 为列表形态时执行；计数形态跳过并记 stats ----
+    if manifest_entries is not None:
+        if files_form == "list":
+            files_set = {norm_path(e) for e in files_elems}
+            manifest_set = {p for p, _ in manifest_entries}
+            for p in sorted(manifest_set - files_set):
+                violations.append(
+                    Violation(
+                        "R8.files-manifest-missing",
+                        files_line if files_line is not None else 1,
+                        "files 列表缺少 manifest 条目：%s" % p,
+                    )
+                )
+            for p in sorted(files_set - manifest_set):
+                violations.append(
+                    Violation(
+                        "R8.files-manifest-extra",
+                        files_line if files_line is not None else 1,
+                        "files 列表条目 %s 不在 manifest 中" % p,
+                    )
+                )
+            stats["manifest_reconcile"] = "done"
+        else:
+            stats["manifest_reconcile"] = "skipped: files 非列表形态"
+
+    return stats
+
+
+# --------------------------------------------------------------------------- #
 # 主校验逻辑
 # --------------------------------------------------------------------------- #
 
@@ -697,6 +1079,7 @@ def verify_report(
     manifest_entries: Optional[List[Tuple[str, int]]] = None,
     manifest_dups: Optional[List[Tuple[str, int]]] = None,
     module_hint: Optional[str] = None,
+    kind: str = "review",
 ) -> ReportResult:
     result = ReportResult(path=path, module=module_hint)
     violations = result.violations
@@ -715,17 +1098,23 @@ def verify_report(
         lines = lines[:-1]
     blocks, masked = find_blocks(lines)
 
-    # ---------------- R1: meta ----------------
+    # ---------------- R1 / R8: meta ----------------
+    # kind=="impl" 时同一套结构判定改挂 R8.* 规则名、字段表换成 §6 七字段；
+    # R2–R7 对 impl 不适用，在 meta 判定后直接走 R8 值域与联动校验返回。
+    is_impl = kind == "impl"
+    meta_rule = "R8" if is_impl else "R1"
     meta_blocks = pick_blocks(blocks, "meta")
     meta: Dict[str, Tuple[int, str]] = {}
     if not meta_blocks:
-        violations.append(Violation("R1.meta-block", 1, "缺少 `meta` 围栏代码块"))
+        violations.append(
+            Violation(meta_rule + ".meta-block", 1, "缺少 `meta` 围栏代码块")
+        )
     else:
         if len(meta_blocks) > 1:
             for extra in meta_blocks[1:]:
                 violations.append(
                     Violation(
-                        "R1.meta-block",
+                        meta_rule + ".meta-block",
                         extra.start + 1,
                         "`meta` 块重复（共 %d 个，必须唯一）" % len(meta_blocks),
                     )
@@ -735,7 +1124,7 @@ def verify_report(
         if off_line is not None:
             violations.append(
                 Violation(
-                    "R1.meta-position",
+                    meta_rule + ".meta-position",
                     block.start + 1,
                     "`meta` 块必须位于报告开头（其前只允许标题、注释与空行）；"
                     "第 %d 行已有其它内容" % off_line,
@@ -743,10 +1132,31 @@ def verify_report(
             )
         if block.end is None:
             violations.append(
-                Violation("R1.meta-block", block.start + 1, "`meta` 围栏未闭合")
+                Violation(
+                    meta_rule + ".meta-block", block.start + 1, "`meta` 围栏未闭合"
+                )
             )
-        meta = parse_meta(block, violations)
-        result.module = meta.get("module", (0, module_hint or ""))[1] or module_hint
+        meta = parse_meta(
+            block,
+            violations,
+            IMPL_META_FIELDS if is_impl else META_FIELDS,
+            meta_rule,
+        )
+        module_field = "unit" if is_impl else "module"
+        result.module = meta.get(module_field, (0, module_hint or ""))[1] or module_hint
+
+    if is_impl:
+        # ---------------- R8: impl 七字段值域 / 联动 / manifest 集合对账 ----------------
+        result.stats = _check_impl_meta(
+            meta, lines, masked, manifest_entries, violations
+        )
+        result.stats["kind"] = "impl"
+        result.stats["manifest_supplied"] = manifest_entries is not None
+        result.stats["manifest_lines"] = (
+            len(manifest_entries) if manifest_entries is not None else 0
+        )
+        result.stats["meta"] = {k: v[1] for k, v in meta.items()}
+        return result
 
     # ---------------- R2: conclusions ----------------
     conc_blocks = pick_blocks(blocks, "conclusions")
@@ -1110,6 +1520,7 @@ def verify_report(
                     )
 
     result.stats = {
+        "kind": kind,
         "conclusions_lines": conc_total,
         "conclusions_valid": len(conclusions),
         "manifest_lines": len(manifest_entries) if manifest_entries is not None else 0,
@@ -1162,6 +1573,11 @@ EPILOG = """\
   R5.id-sequence / R5.dangling-id
   R6.unknown-id
   R7.meta-vs-table / R7.severity-unknown
+  R8.meta-block / R8.meta-position / R8.meta-fields / R8.meta-verdict / R8.meta-unit /
+  R8.meta-sha / R8.meta-rr / R8.meta-unresolved
+  R8.files-format / R8.files-sha-count / R8.files-sha-path / R8.none-consistency /
+  R8.verdict-rr / R8.sha-equal / R8.files-manifest-missing / R8.files-manifest-extra
+  （R8.* 仅 --kind impl 下判定；impl 模式不校验 R2–R7）
   io.read / io.parse / io.encoding（后者为 WARN，不影响退出码）
 
 manifest 格式：一行一个仓库相对路径，`#` 开头为注释，空行忽略。
@@ -1205,6 +1621,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="批量模式的清单目录：按 <模块>.txt / <模块>.md.txt 查找（可选）",
     )
     parser.add_argument(
+        "--kind",
+        choices=("review", "impl"),
+        default="review",
+        help="报告种类：review=§8.5 评审报告（默认）；impl=§6 实施/修复类报告（七字段 meta）",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="输出机器可读 JSON（含每条违规的 file/line/rule/message 与汇总）",
@@ -1221,10 +1643,11 @@ def run_report(
     path: str,
     manifest_path: Optional[str],
     manifest_dir: Optional[str] = None,
+    kind: str = "review",
 ) -> ReportResult:
     if manifest_path:
         entries, dups, warn = parse_manifest(manifest_path)
-        result = verify_report(path, entries, dups, None)
+        result = verify_report(path, entries, dups, None, kind)
         if warn is not None:
             result.violations.append(warn)
         return result
@@ -1238,14 +1661,16 @@ def run_report(
         for cand in candidates:
             if os.path.isfile(cand):
                 entries, dups, warn = parse_manifest(cand)
-                result = verify_report(path, entries, dups, stem)
+                result = verify_report(path, entries, dups, stem, kind)
                 if warn is not None:
                     result.violations.append(warn)
                 return result
-        result = verify_report(path, None, None, stem)
+        result = verify_report(path, None, None, stem, kind)
         result.stats["manifest_supplied"] = False
         return result
-    return verify_report(path, None, None, os.path.splitext(os.path.basename(path))[0])
+    return verify_report(
+        path, None, None, os.path.splitext(os.path.basename(path))[0], kind
+    )
 
 
 def print_human(results: Sequence[ReportResult], out) -> None:
@@ -1320,7 +1745,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
                 args, args.manifest, "io.manifest", "manifest 不存在或不是文件"
             )
         try:
-            results.append(run_report(args.report, args.manifest, None))
+            results.append(run_report(args.report, args.manifest, None, args.kind))
         except OSError as exc:
             return emit_io_error(args, args.report, "io.read", str(exc))
         except Exception as exc:  # 解析崩溃统一边界：返回 2，绝不打印 traceback
@@ -1345,7 +1770,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         for name in names:
             full = os.path.join(args.dir, name)
             try:
-                results.append(run_report(full, None, args.manifest_dir))
+                results.append(run_report(full, None, args.manifest_dir, args.kind))
             except OSError as exc:
                 io_error = True
                 res = ReportResult(path=full, module=os.path.splitext(name)[0])

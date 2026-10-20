@@ -4,7 +4,8 @@
 
 每个夹具目录含：
   report.md     被测报告
-  manifest.txt  期望文件清单
+  manifest.txt  期望文件清单（可选；无此文件则不传 --manifest）
+  args.txt      可选：每非空非 `#` 行作为一个附加 CLI 参数（如 --kind / impl）
   expect.txt    期望：exit=<0|1>、first_rule=<规则名>、rules=<逗号分隔的规则集合>
 
 用法：python -B scripts/tests/run_fixtures.py [--verbose]
@@ -46,10 +47,19 @@ def main(argv=None):
         base = os.path.join(FIXTURES, name)
         report = os.path.join(base, "report.md")
         manifest = os.path.join(base, "manifest.txt")
+        extra_args = []
+        args_file = os.path.join(base, "args.txt")
+        if os.path.isfile(args_file):
+            with open(args_file, "r", encoding="utf-8-sig") as fh:
+                for raw in fh:
+                    arg = raw.strip()
+                    if arg and not arg.startswith("#"):
+                        extra_args.append(arg)
         expect = parse_expect(os.path.join(base, "expect.txt"))
         cmd = [sys.executable, "-B", TOOL, "--report", report]
         if os.path.isfile(manifest):
             cmd += ["--manifest", manifest]
+        cmd += extra_args
         cmd += ["--json"]
         env = dict(os.environ)
         env["PYTHONDONTWRITEBYTECODE"] = "1"  # 不产生 scripts/__pycache__

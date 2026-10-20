@@ -1,7 +1,7 @@
 ---
 name: cto-flow
 description: Run a coding task through the CTO orchestration protocol — the main agent only plans, dispatches, and accepts; subagents act as named engineers — specification engineers draft the batch spec first, senior software engineers implement in parallel, an equal number of lead review engineers deep-review, then defect-fix engineers repair and an independent verification engineer re-verifies. Use for any code change, refactor, migration, audit, or multi-file task.
-version: 1.2.0
+version: 1.2.1
 ---
 
 # CTO Flow
@@ -189,6 +189,8 @@ version: 1.2.0
 10. **批次可中断性（进度台账）**：批次任一时刻必须存在一份**只依赖磁盘**的进度台账（**必须**落盘**在仓库外**，绝对路径写进最终答复；**不得**只存在于上下文），至少含：① 已完成的实施单元 / 模块清单；② 每份交付物的绝对路径 + SHA256；③ 未派工清单（模块名 → 文件数）；④ 下一步动作与已知风险。用户要求暂停 / 长时中断后恢复时，恢复的第一动作是**读该台账**（命令与原始输出记入最终答复）。
 
 **全角色报告落盘**：批次开工时 CTO 在台账声明本批报告归档目录（仓库外路径或 `docs/reviews/` 类），任务书写明绝对路径；**全部角色**（含实施 / 修复 / 重构 / 检查点提交 / 发布执行）的报告一律落盘，回传内容按 §5 回传契约执行；§5 未覆盖的角色只放 `meta` 计数 + 交付物路径 + SHA256 + 未解决项一行。实施 / 修复类报告同样以 `meta` 机读块开头，字段固定为 `unit` / `verdict` / `files` / `sha256_before` / `sha256_after` / `reverse_restore` / `unresolved` 七行、顺序固定；`verdict` 取值域 `pass | fail`，`reverse_restore` 取值 `pass | fail | na`。
+
+**实施 / 修复报告 `meta` 机读口径（与 `scripts/cto_verify.py --kind impl` 的校验逐条对应；本句是值域的唯一权威全文，§4 / §8.9 模板只作指针）**：`files` 取两种形态之一——单文件单元写 ASCII 非负整数 `1`；多文件单元写以 `;` 或 `；` 分隔的仓库相对路径列表（不得含空元素、空白、反引号与 `|`）；`sha256_before` / `sha256_after` 对应取单值（64 位十六进制）或与 `files` 列表等长的 `路径=哈希` 列表（按最后一个 `=` 切分，路径须与 `files` 同位元素一致）；`sha256_before` 的元素或整值可取 `none`（新建文件无基线，此时 `reverse_restore` 必须为 `na`），`sha256_after` 不得取 `none`；before 与 after 对应位全部相等时必须在正文写出 `sha256 相同` 及理由，否则判不通过；`reverse_restore: fail` 时 `verdict` 不得为 `pass`；`unresolved` 写 `无` 或以 `;` / `；` 分隔的未决项简述，其非 `无` 不阻断 `verdict: pass`（未决项仍须逐项落盘正文）。
 
 **证据产物归档**：评审 / 复验 / 验证报告、结论行文件、构建日志、指纹与快照等证据产物一律落盘到本批声明的归档路径（仓库外固定目录，或入库时 `docs/reviews/` 类路径），进度台账逐份登记绝对路径 + SHA256；未登记路径的产物视为未交付（按静默失败 ① 处理）。
 
@@ -577,12 +579,29 @@ minor: 5
 禁止：修改受版本控制文件；用摘要代替原文核对；用"整体看过了"代替对象级结论；发布任何对外内容（发布须 CTO 授权，见 §9.5）
 ```
 
+## 附录 A · 平台与环境陷阱清单（指导性）
+
+> 本附录为**指导性补充**：正文强制条款优先，条目中的规避做法不解除 §1–§9 任何义务；其中 P9 对应的「共享工作区并发纪律」本身是 §2 阶段 1 的强制条款，此处仅作索引。证据来源：跨 session 审计汇总（cto-flow-audit SUMMARY T2-10 行）。
+
+| # | 陷阱 | 实测失败形态 | 规避做法 |
+|---|---|---|---|
+| P1 | Windows 混合 shell 引号 | bash 会话里照抄 PowerShell 的 `$_` / `$null` / 反引号续行，或 cmd 的 `2>nul`：变量被 bash 展开成空串，`> nul` / `> $null` 造出**字面名文件** | 命令按当前 shell 方言改写（`shell_flavor` 显式选型）；跨 shell 用 Python 单行；重定向目标写 `/dev/null`（bash）或 `$null`（pwsh），不混写 |
+| P2 | CRLF 链 | write 类工具落盘 CRLF；`grep -c $'\r'` 对混合行尾统计失真；`git apply -R` 对 EOL 有损，逆向还原后哈希≠基线 | 落盘后以字节级工具（`od` / Python `open(...,'rb')`）实测行尾再统计；反向还原基线哈希以**落盘实测**为准，不凭推算 |
+| P3 | MSYS/Git Bash 路径改头 | 以 `/` 开头的实参被展开成 Git 安装目录前缀（`/sdcard` → `C:/Program Files/Git/sdcard`） | `MSYS_NO_PATHCONV=1` 前缀、双斜杠 `//sdcard`，或该类命令改走原生 PowerShell |
+| P4 | `/tmp` 不可达 | Windows 下 `/tmp` 无稳定映射，写临时文件静默落空或落到错误盘符 | 临时/证据文件一律落任务书指定的仓库外目录；不得以 `/tmp` 作约定路径 |
+| P5 | exec 静默 clamp | 单条命令实际运行时长被平台静默截断（实测 4m40s 量级），长构建返回截断输出被误读为成功 | 长任务分片执行并写进度文件；对疑似截断的命令用更短定向重跑确认，不把截断输出当完整证据 |
+| P6 | pwsh `run:` 块退出码 | 多行脚本块只有**末腿**退出码上传，前腿失败、末腿成功 ⇒ 整体判成功 | 每腿后显式判 `$LASTEXITCODE` / `$?`，腿间用 `&&` 链接，或拆成多条命令逐条验收 |
+| P7 | Gradle daemon 内存预算 | 长驻 daemon 叠加大堆参数顶穿宿主内存，构建 OOM/卡死被误判为代码问题 | `gradle.properties` 固定 `org.gradle.jvmargs` 上限；必要时 `--no-daemon`；构建前 `gradlew --stop` 清场 |
+| P8 | K/N 测试名禁字符 | Kotlin/Native 测试名含空格/中文/特殊字符时注册失败，测试被跳过造成零执行假绿 | 测试名只用 `[A-Za-z0-9_.-]`；证据必须含 `tests=<N>` 且 N>0（§5 构建证据契约） |
+| P9 | 并发工作区构建互相破坏 | 增量缓存 `already registered`、`classes.jar` 截断、共享 `test-results` 被覆盖、`gradlew --stop` 互相打断 | **强制条款**，执行口径以 §2 阶段 1「共享工作区并发纪律」①–⑧ 为准：同波次至多 1 个构建者、默认独立 `git worktree`/仓库外隔离副本、结果同命令快照出仓、`--tests` 用显式类名 |
+
 ## 变更记录
 
 | 版本 | 日期 | 要点 |
 |---|---|---|
 | 1.1.0 | 2026-10-19 | 基线：§9 审查批次模式、顺序优先、角色独立性表、meta/conclusions 机读块、构建证据契约、共享工作区并发纪律 |
 | 1.2.0 | 2026-10-20 | 能力档映射与降级协议；子代理生命周期（僵尸/停滞/增量落盘/中断核实）；外部副作用白名单；全角色报告落盘与回传容量预算、CTO 上下文预算；worktree 优先与树级操作禁令；CTO 越权自查清单；规格竞争启用条件与候选隔离；批次开工指纹；诊断车道与审计变体；角色称谓封闭集；证据产物归档；环境前置段 |
+| 1.2.1 | 2026-10-20 | §6 增实施/修复报告 `meta` 机读口径句（七字段值域唯一权威全文，对应 `cto_verify.py --kind impl`）；文末增附录 A 平台与环境陷阱清单（指导性，九条实测条目） |
 
 **权威源码**：`C:\Users\laevatain\Code\skills\cto-flow\`（仓库内唯一权威版本，改动必须先落仓库）。
 **部署方式**：把本目录复制到 `~\.agents\skills\`（部署副本非权威，漂移时以仓库版为准）。

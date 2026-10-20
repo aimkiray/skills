@@ -1,0 +1,3 @@
+exit=1
+first_rule=R8.meta-rr
+rules=R8.meta-rr

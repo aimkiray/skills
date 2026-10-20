@@ -1,0 +1,3 @@
+exit=1
+first_rule=R8.files-sha-count
+rules=R8.files-sha-count
