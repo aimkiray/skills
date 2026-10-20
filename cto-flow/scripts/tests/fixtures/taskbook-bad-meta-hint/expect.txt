@@ -1,0 +1,3 @@
+exit=1
+first_rule=R9.meta-hint
+rules=R9.meta-hint

@@ -1,0 +1,3 @@
+exit=1
+first_rule=R9.field-required
+rules=R9.field-required

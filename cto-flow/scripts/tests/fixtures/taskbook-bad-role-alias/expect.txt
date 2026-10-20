@@ -1,0 +1,3 @@
+exit=1
+first_rule=R9.role-alias
+rules=R9.role-alias

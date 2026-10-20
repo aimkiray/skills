@@ -1,0 +1,3 @@
+exit=1
+first_rule=R9.metric-prediction
+rules=R9.metric-prediction

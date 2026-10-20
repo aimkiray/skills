@@ -1,0 +1,3 @@
+exit=1
+first_rule=R9.lineno-locating
+rules=R9.lineno-locating

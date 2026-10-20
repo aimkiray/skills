@@ -30,6 +30,16 @@
       可取 none（此时 reverse_restore 必须为 na），before/after 对应位全部
       相等须在正文写明「sha256 相同」及理由；reverse_restore: fail 时 verdict
       不得为 pass；提供 --manifest 且 files 为列表形态时做集合对账。
+  R9  （仅 --kind taskbook，§4/§5/§8.8/§8.9/§9.7 任务书文本；此模式不校验 R1–R8）
+      R9.role-declare 任务书缺少角色声明行（你是<具名角色>…）；
+      R9.role-alias 首个角色声明的称谓不在五工程师封闭集（含 CTO、
+      未映射具名角色的「<职能>工程师」非契约称谓）；R9.field-required
+      八个必需字段（单元/目标文件/约束/能力/授权副作用/环境前置/校验/
+      返回契约）任一别名都无命中即缺；R9.lineno-locating 行号定位
+      （第 N 行 / 第 N–M 行 / file.ext:N）；R9.metric-prediction 预测
+      度量（预计/约 N 行·处·字节、改动 N 处）；R9.meta-hint 面向实施/
+      修复角色时未提示七字段 meta 枚举（七字面量在全文含围栏核对，
+      其余 R9 规则仅对未被围栏覆盖的行判定）。
 
 退出码：0 = 全部通过；1 = 存在契约违规（含超长数字等无法解析的取值）；2 = 用法、
 IO 或校验器内部错误（内部错误不打印 traceback）。
@@ -54,7 +64,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 TOOL_NAME = "cto_verify"
-TOOL_VERSION = "1.2.1"
+TOOL_VERSION = "1.2.2"
 
 ERROR = "ERROR"
 WARN = "WARN"
@@ -1102,6 +1112,13 @@ def verify_report(
         lines = lines[:-1]
     blocks, masked = find_blocks(lines)
 
+    if kind == "taskbook":
+        # ------------- R9: 任务书 lint（不校验 R1–R8，无 meta/conclusions 契约） -------------
+        result.stats = _check_taskbook(lines, masked, violations)
+        result.stats["kind"] = "taskbook"
+        result.module = module_hint
+        return result
+
     # ---------------- R1 / R8: meta ----------------
     # kind=="impl" 时同一套结构判定改挂 R8.* 规则名、字段表换成 §6 七字段；
     # R2–R7 对 impl 不适用，在 meta 判定后直接走 R8 值域与联动校验返回。
@@ -1563,6 +1580,161 @@ def classify_severity(value: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
+# 任务书 lint（--kind taskbook，规则名 R9.*；不校验 R1–R8）
+# --------------------------------------------------------------------------- #
+
+# R9 任务书 lint（--kind taskbook）：五工程师封闭集（任务书不以 CTO 为对象）
+_TB_ROLES = ("高级软件工程师", "资深评审工程师", "独立复验工程师", "缺陷修复工程师", "规格工程师")
+_TB_IMPL_ROLES = ("高级软件工程师", "缺陷修复工程师")
+_TB_ROLE_RE = re.compile(r"你是\s*([A-Za-z\u4e00-\u9fff]{1,12}工程师|CTO)")
+_TB_IMPL_META_TOKENS = ("unit", "verdict", "files", "sha256_before", "sha256_after", "reverse_restore", "unresolved")
+_TB_FIELDS = {
+    "单元": ("单元", "实施单元", "审查单元", "模块", "被审对象", "unit"),
+    "目标文件": ("涉及文件", "目标文件", "文件全集", "对象", "被审对象"),
+    "约束": ("约束", "禁止"),
+    "能力": ("所需能力清单", "能力"),
+    "授权副作用": ("授权副作用清单", "授权副作用"),
+    "环境前置": ("环境前置",),
+    "校验": ("必须执行的校验", "必须执行的命令", "必须实际执行", "校验"),
+    "返回契约": ("返回格式", "回传消息", "回传消息契约", "输出格式", "返回契约"),
+}
+_TB_FIELD_LINE_RE = lambda alias: re.compile(
+    r"^\s{0,3}(?:[-*+]\s*)?(?:\*\*)?" + re.escape(alias) +
+    r"(?:\*\*)?(?:（[^）]*）|\([^)]*\))?\s*[:：]")
+_TB_FIELD_HEAD_RE = lambda alias: re.compile(r"^ {0,3}#{1,6}\s+[^#]*" + re.escape(alias))
+_TB_LINENO_RES = (
+    re.compile(r"第\s*\d+\s*[-–—~至到]\s*\d+\s*行"),
+    re.compile(r"第\s*\d+\s*行"),
+    re.compile(r"[A-Za-z0-9_./\\-]+\.(?:py|md|java|kt|kts|ts|tsx|js|jsx|go|rs|c|cc|cpp|h|hpp|cs|rb|php|swift|yaml|yml|toml|json|xml|gradle|sh|ps1|txt)\s*:\s*\d+"),
+)
+_TB_METRIC_RES = (
+    re.compile(r"(?:预计|预估|约|共)\s*\d+\s*(?:行|处|字节)"),
+    re.compile(r"(?:改动|修改|编辑)\s*\d+\s*处"),
+    re.compile(r"\d+\s*处\s*(?:改动|修改|编辑)"),
+)
+
+
+def _check_taskbook(
+    lines: Sequence[str], masked: set, violations: List[Violation]
+) -> Dict[str, object]:
+    """任务书 lint（R9.*）：发射顺序固定，保证 first_rule 可判定。
+
+    除 R9.meta-hint（七字面量在全文含围栏核对）外，各规则只对未被围栏
+    覆盖的行判定；任务书是文本不是报告，manifest 不适用、一律忽略。
+    """
+    stats: Dict[str, object] = {}
+    full_text = "\n".join(lines)
+
+    # ---- R9.role-declare / R9.role-alias：未围栏行中首个角色声明 ----
+    role: Optional[str] = None
+    role_line = 1
+    for idx, raw in enumerate(lines):
+        if idx in masked:
+            continue
+        m = _TB_ROLE_RE.search(raw)
+        if m:
+            role = m.group(1)
+            role_line = idx + 1
+            break
+    stats["role"] = role
+    if role is None:
+        violations.append(
+            Violation("R9.role-declare", 1, "任务书缺少角色声明行")
+        )
+    elif role not in _TB_ROLES:
+        violations.append(
+            Violation(
+                "R9.role-alias",
+                role_line,
+                "非契约称谓 %s：须映射五工程师角色并以『（本单元职能：X）』标注"
+                % role,
+            )
+        )
+
+    # ---- R9.field-required：八必需字段，任一 alias 行/标题命中即满足 ----
+    fields_missing: List[str] = []
+    for canonical, aliases in _TB_FIELDS.items():
+        hit = False
+        for alias in aliases:
+            line_re = _TB_FIELD_LINE_RE(alias)
+            head_re = _TB_FIELD_HEAD_RE(alias)
+            for idx, raw in enumerate(lines):
+                if idx in masked:
+                    continue
+                if line_re.match(raw) or head_re.match(raw):
+                    hit = True
+                    break
+            if hit:
+                break
+        if not hit:
+            fields_missing.append(canonical)
+            violations.append(
+                Violation(
+                    "R9.field-required",
+                    1,
+                    "任务书缺少必需字段「%s」（认可别名：%s）"
+                    % (canonical, "、".join(aliases)),
+                )
+            )
+    stats["fields_missing"] = fields_missing
+
+    # ---- R9.lineno-locating：逐未围栏行，每命中记一条 ----
+    lineno_hits = 0
+    for idx, raw in enumerate(lines):
+        if idx in masked:
+            continue
+        for rx in _TB_LINENO_RES:
+            for m in rx.finditer(raw):
+                lineno_hits += 1
+                violations.append(
+                    Violation(
+                        "R9.lineno-locating",
+                        idx + 1,
+                        "任务书禁止行号定位：%r（改用内容锚点定位）" % m.group(0),
+                    )
+                )
+    stats["lineno_hits"] = lineno_hits
+
+    # ---- R9.metric-prediction：逐未围栏行，每命中记一条 ----
+    metric_hits = 0
+    for idx, raw in enumerate(lines):
+        if idx in masked:
+            continue
+        for rx in _TB_METRIC_RES:
+            for m in rx.finditer(raw):
+                metric_hits += 1
+                violations.append(
+                    Violation(
+                        "R9.metric-prediction",
+                        idx + 1,
+                        "任务书禁止预测度量：%r（行数/处数/字节数由实施者实测）"
+                        % m.group(0),
+                    )
+                )
+    stats["metric_hits"] = metric_hits
+
+    # ---- R9.meta-hint：仅实施类角色；七字面量在全文（含围栏）逐一核对 ----
+    if role in _TB_IMPL_ROLES:
+        missing_tokens = [t for t in _TB_IMPL_META_TOKENS if t not in full_text]
+        if missing_tokens:
+            violations.append(
+                Violation(
+                    "R9.meta-hint",
+                    1,
+                    "任务书面向实施/修复角色，但未提示七字段 meta 枚举；"
+                    "缺失字面量：%s" % ", ".join(missing_tokens),
+                )
+            )
+        stats["meta_hint"] = (
+            "missing:" + ",".join(missing_tokens) if missing_tokens else "ok"
+        )
+    else:
+        stats["meta_hint"] = "na"
+
+    return stats
+
+
+# --------------------------------------------------------------------------- #
 # 命令行
 # --------------------------------------------------------------------------- #
 
@@ -1582,6 +1754,9 @@ EPILOG = """\
   R8.files-format / R8.files-sha-count / R8.files-sha-path / R8.none-consistency /
   R8.verdict-rr / R8.sha-equal / R8.files-manifest-missing / R8.files-manifest-extra
   （R8.* 仅 --kind impl 下判定；impl 模式不校验 R2–R7）
+  R9.role-declare / R9.role-alias / R9.field-required / R9.lineno-locating /
+  R9.metric-prediction / R9.meta-hint
+  （R9.* 仅 --kind taskbook 下判定；manifest 不适用）
   io.read / io.parse / io.encoding（后者为 WARN，不影响退出码）
 
 manifest 格式：一行一个仓库相对路径，`#` 开头为注释，空行忽略。
@@ -1626,9 +1801,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--kind",
-        choices=("review", "impl"),
+        choices=("review", "impl", "taskbook"),
         default="review",
-        help="报告种类：review=§8.5 评审报告（默认）；impl=§6 实施/修复类报告（七字段 meta）",
+        help="报告种类：review=§8.5 评审报告（默认）；impl=§6 实施/修复类报告（七字段 meta）；taskbook=任务书 lint（R9，不校验 R1–R8）",
     )
     parser.add_argument(
         "--json",
